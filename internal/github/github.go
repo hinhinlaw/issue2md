@@ -126,140 +126,90 @@ func fetchAndSetReactions(item reactionable, owner, repo, token string) error {
 }
 
 func FetchIssue(owner, repo string, issueNumber int, token string, enableReactions bool) (*Issue, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, issueNumber)
+	variables := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": issueNumber,
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	gqlResp, err := executeGraphQL(issueQuery, variables, token)
 	if err != nil {
 		return nil, err
 	}
 
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
+	var issueResp GraphQLIssueResponse
+	if err := json.Unmarshal(gqlResp.Data, &issueResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal issue response: %w", err)
 	}
 
-	resp, err := sharedHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned status: %s", resp.Status)
-	}
-
-	var issue Issue
-	if err := json.NewDecoder(resp.Body).Decode(&issue); err != nil {
-		return nil, err
-	}
+	issue := graphQLIssueToIssue(&issueResp)
 
 	if enableReactions {
-		if err := fetchAndSetReactions(&issue, owner, repo, token); err != nil {
-			return nil, err
-		}
+		reactions := graphQLIssueReactions(&issueResp)
+		issue.SetReactions(reactions)
 	}
 
-	return &issue, nil
+	return issue, nil
 }
 
 func FetchPullRequest(owner, repo string, pullNumber int, token string, enableReactions bool) (*PullRequest, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, pullNumber)
+	variables := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": pullNumber,
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	gqlResp, err := executeGraphQL(pullRequestQuery, variables, token)
 	if err != nil {
 		return nil, err
 	}
 
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
+	var prResp GraphQLPullRequestResponse
+	if err := json.Unmarshal(gqlResp.Data, &prResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal pull request response: %w", err)
 	}
 
-	resp, err := sharedHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned status: %s", resp.Status)
-	}
-
-	var pullRequest PullRequest
-	if err := json.NewDecoder(resp.Body).Decode(&pullRequest); err != nil {
-		return nil, err
-	}
+	pr := graphQLPRToPullRequest(&prResp)
 
 	if enableReactions {
-		if err := fetchAndSetReactions(&pullRequest, owner, repo, token); err != nil {
-			return nil, err
-		}
+		reactions := graphQLPRReactions(&prResp)
+		pr.SetReactions(reactions)
 	}
 
-	return &pullRequest, nil
+	return pr, nil
 }
 
 func FetchComments(owner, repo string, issueNumber int, token string, enableReactions bool, enableUserLinks bool) ([]Comment, error) {
-	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/comments", owner, repo, issueNumber)
 	var allComments []Comment
+	var after string
 
-	nextURL := baseURL // Initial URL
+	for {
+		variables := map[string]interface{}{
+			"owner":  owner,
+			"repo":   repo,
+			"number": issueNumber,
+		}
+		if after != "" {
+			variables["after"] = after
+		}
 
-	for nextURL != "" {
-		req, err := http.NewRequest("GET", nextURL, nil)
+		gqlResp, err := executeGraphQL(issueCommentsQuery, variables, token)
 		if err != nil {
 			return nil, err
 		}
 
-		if token != "" {
-			req.Header.Set("Authorization", "token "+token)
+		var commentsResp GraphQLIssueCommentsResponse
+		if err := json.Unmarshal(gqlResp.Data, &commentsResp); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal comments response: %w", err)
 		}
 
-		resp, err := sharedHTTPClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
+		comments := graphQLIssueCommentsResponseToComments(&commentsResp)
+		allComments = append(allComments, comments...)
 
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GitHub API returned status: %s", resp.Status)
+		if !commentsResp.Repository.Issue.Comments.PageInfo.HasNextPage {
+			break
 		}
-
-		var currentComments []Comment
-		if err := json.NewDecoder(resp.Body).Decode(&currentComments); err != nil {
-			return nil, err
-		}
-
-		// Fetch reactions for each comment
-		if enableReactions {
-			for i := range currentComments {
-				reactions, err := FetchReactionsForComment(owner, repo, currentComments[i].ID, token)
-				if err != nil {
-					return nil, fmt.Errorf("failed to fetch reactions for comment %d in %s/%s issue %d: %v. Ensure you have set a valid GITHUB_TOKEN", currentComments[i].ID, owner, repo, issueNumber, err)
-				}
-				currentComments[i].Reactions = reactions
-			}
-		}
-
-		allComments = append(allComments, currentComments...)
-
-		nextURL = "" // Reset nextURL, will be updated from Link header if exists
-		linkHeader := resp.Header.Get("Link")
-		if linkHeader != "" {
-			// Parse Link header to find "next" page URL
-			for _, link := range strings.Split(linkHeader, ",") {
-				link = strings.TrimSpace(link)
-				parts := strings.Split(link, ";")
-				if len(parts) != 2 {
-					continue
-				}
-				urlPart := strings.Trim(parts[0], "<>")
-				relPart := strings.TrimSpace(parts[1])
-				if relPart == `rel="next"` {
-					nextURL = urlPart
-					break // Found "next", no need to check other links
-				}
-			}
-		}
-		// If nextURL is still "", it means no "next" page, so exit loop
+		after = commentsResp.Repository.Issue.Comments.PageInfo.EndCursor
 	}
 
 	return allComments, nil
@@ -303,102 +253,57 @@ func FetchReactionsForComment(owner, repo string, commentID int, token string) (
 }
 
 func FetchDiscussion(owner, repo string, discussionNumber int, token string) (*Discussion, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/discussions/%d", owner, repo, discussionNumber)
+	variables := map[string]interface{}{
+		"owner":  owner,
+		"repo":   repo,
+		"number": discussionNumber,
+	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	gqlResp, err := executeGraphQL(discussionQuery, variables, token)
 	if err != nil {
 		return nil, err
 	}
 
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json") // Important for Discussions API
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")    // Specify API version
-
-	resp, err := sharedHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned status: %s", resp.Status)
+	var discResp GraphQLDiscussionResponse
+	if err := json.Unmarshal(gqlResp.Data, &discResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal discussion response: %w", err)
 	}
 
-	var discussion Discussion
-	if err := json.NewDecoder(resp.Body).Decode(&discussion); err != nil {
-		return nil, err
-	}
-
-	return &discussion, nil
+	discussion := graphQLDiscussionToDiscussion(&discResp)
+	return discussion, nil
 }
 
 func FetchDiscussionComments(owner, repo string, discussionNumber int, token string, enableReactions bool) ([]DiscussionComment, error) {
-	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/discussions/%d/comments?state=all", owner, repo, discussionNumber)
 	var allComments []DiscussionComment
+	var after string
 
-	nextURL := baseURL // Initial URL
+	for {
+		variables := map[string]interface{}{
+			"owner":  owner,
+			"repo":   repo,
+			"number": discussionNumber,
+		}
+		if after != "" {
+			variables["after"] = after
+		}
 
-	for nextURL != "" {
-		req, err := http.NewRequest("GET", nextURL, nil)
+		gqlResp, err := executeGraphQL(discussionCommentsQuery, variables, token)
 		if err != nil {
 			return nil, err
 		}
 
-		if token != "" {
-			req.Header.Set("Authorization", "token "+token)
-		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-		resp, err := sharedHTTPClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("GitHub API returned status: %s", resp.Status)
+		var commentsResp GraphQLDiscussionCommentsResponse
+		if err := json.Unmarshal(gqlResp.Data, &commentsResp); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal discussion comments response: %w", err)
 		}
 
-		var currentComments []DiscussionComment
-		if err := json.NewDecoder(resp.Body).Decode(&currentComments); err != nil {
-			return nil, err
-		}
+		comments := graphQLDiscussionCommentsResponseToComments(&commentsResp)
+		allComments = append(allComments, comments...)
 
-		// Fetch reactions for each discussion comment
-		if enableReactions {
-			for i := range currentComments {
-				reactions, err := FetchReactionsForComment(owner, repo, currentComments[i].ID, token)
-				if err != nil {
-					return nil, fmt.Errorf("failed to fetch reactions for comment %d in %s/%s discussion %d: %v. Ensure you have set a valid GITHUB_TOKEN", currentComments[i].ID, owner, repo, discussionNumber, err)
-				}
-				currentComments[i].Reactions = reactions
-			}
+		if !commentsResp.Repository.Discussion.Comments.PageInfo.HasNextPage {
+			break
 		}
-
-		allComments = append(allComments, currentComments...)
-
-		nextURL = "" // Reset nextURL, will be updated from Link header if exists
-		linkHeader := resp.Header.Get("Link")
-		if linkHeader != "" {
-			// Parse Link header to find "next" page URL
-			for _, link := range strings.Split(linkHeader, ",") {
-				link = strings.TrimSpace(link)
-				parts := strings.Split(link, ";")
-				if len(parts) != 2 {
-					continue
-				}
-				urlPart := strings.Trim(parts[0], "<>")
-				relPart := strings.TrimSpace(parts[1])
-				if relPart == `rel="next"` {
-					nextURL = urlPart
-					break // Found "next", no need to check other links
-				}
-			}
-		}
-		// If nextURL is still "", it means no "next" page, so exit loop
+		after = commentsResp.Repository.Discussion.Comments.PageInfo.EndCursor
 	}
 
 	return allComments, nil
