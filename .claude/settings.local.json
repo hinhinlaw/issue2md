@@ -33,7 +33,11 @@
       "Bash(curl -s \"https://api.github.com/repos/hinhinlaw/issue2md/rulesets\")",
       "WebFetch(domain:api.github.com)",
       "Bash(curl -s -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/hinhinlaw/issue2md\")",
-      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Visibility:', d.get\\('visibility'\\)\\); print\\('Private:', d.get\\('private'\\)\\); print\\('Fork:', d.get\\('fork'\\)\\)\")"
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Visibility:', d.get\\('visibility'\\)\\); print\\('Private:', d.get\\('private'\\)\\); print\\('Fork:', d.get\\('fork'\\)\\)\")",
+      "Bash(curl *)",
+      "Bash(GIT_TRACE=1 GIT_CURL_VERBOSE=1 git push origin skill)",
+      "Bash(git reset *)",
+      "Bash(git commit *)"
     ],
     "deny": [
       "Read(./.env*)",
